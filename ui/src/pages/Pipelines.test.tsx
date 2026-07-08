@@ -6,11 +6,15 @@ import {
 } from "../lib/pipeline-stage-presentation";
 import {
   buildWorkflowBoardRecords,
+  buildWorkflowStressSteps,
+  filterWorkflowBoardSteps,
   groupCasesByBuiltFor,
   normalizePipelineConversationComments,
   pipelineBoardGroupByStorageKey,
   readStoredPipelineBoardGroupBy,
   readPipelineStageAutomationAssigneeAgentId,
+  WORKFLOW_STRESS_STEP_COUNT,
+  workflowBoardPanForStep,
   workflowBoardSearchForView,
   workflowBoardViewFromSearch,
   writeStoredPipelineBoardGroupBy,
@@ -90,6 +94,40 @@ describe("workflow board route view state", () => {
   it("writes shareable workflow view query strings without dropping other params", () => {
     expect(workflowBoardSearchForView("?mode=compact", "customer")).toBe("?mode=compact&view=customer-journey");
     expect(workflowBoardSearchForView("?view=customer-journey", "operations")).toBe("?view=business-operations");
+  });
+});
+
+describe("workflow board verification affordances", () => {
+  it("builds a stable 100-step cluster for stress verification", () => {
+    const customerSteps = buildWorkflowStressSteps("customer");
+    const operationsSteps = buildWorkflowStressSteps("operations");
+
+    expect(customerSteps).toHaveLength(WORKFLOW_STRESS_STEP_COUNT);
+    expect(operationsSteps).toHaveLength(WORKFLOW_STRESS_STEP_COUNT);
+    expect(customerSteps.every((step) => step.view === "customer")).toBe(true);
+    expect(operationsSteps.every((step) => step.view === "operations")).toBe(true);
+    expect(new Set(customerSteps.map((step) => step.stage))).toEqual(new Set(["demand", "sales", "production"]));
+    expect(new Set(operationsSteps.map((step) => step.stage))).toEqual(
+      new Set(["support", "tools", "governance", "reporting", "manual", "agent"]),
+    );
+  });
+
+  it("filters the board search independently of the global command palette", () => {
+    const model = buildWorkflowBoardRecords([
+      pipeline({ id: "ops", name: "Business reporting workflow" }),
+    ]);
+
+    expect(filterWorkflowBoardSteps(model.steps, "qualify").map((step) => step.shortName)).toContain("Qualify");
+    expect(filterWorkflowBoardSteps(model.steps, "reporting").map((step) => step.shortName)).toEqual(
+      expect.arrayContaining(["Operating Report", "Business reporting workflow"]),
+    );
+  });
+
+  it("recenters the selected step from the same calculation used by search focus", () => {
+    const pan = workflowBoardPanForStep({ x: 570, y: 190 }, 0.78);
+    expect(pan.x).toBeCloseTo(-84.6);
+    expect(pan.y).toBeCloseTo(71.8);
+    expect(workflowBoardPanForStep({ x: 100, y: 200 }, 1, { x: 500, y: 300 })).toEqual({ x: 400, y: 100 });
   });
 });
 

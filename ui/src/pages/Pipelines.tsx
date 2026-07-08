@@ -675,6 +675,8 @@ const WORKFLOW_STAGE_X: Record<WorkflowStage, number> = {
   agent: 720,
 };
 
+export const WORKFLOW_STRESS_STEP_COUNT = 100;
+
 const WORKFLOW_STEP_TYPE_CLASS: Record<WorkflowStepType, string> = {
   intake: "border-sky-400/70 bg-sky-500/15 text-sky-950 dark:text-sky-100",
   manual: "border-amber-400/70 bg-amber-500/15 text-amber-950 dark:text-amber-100",
@@ -812,6 +814,46 @@ function workflowStageRows(view: WorkflowBoardView): WorkflowStage[] {
     : ["support", "tools", "governance", "reporting", "manual", "agent"];
 }
 
+export function buildWorkflowStressSteps(view: WorkflowBoardView): WorkflowStepRecord[] {
+  return Array.from({ length: WORKFLOW_STRESS_STEP_COUNT }, (_, index) => {
+    const stages = workflowStageRows(view);
+    const stage = stages[index % stages.length];
+    return {
+      id: `stress-${view}-${index}`,
+      shortName: `Cluster ${index + 1}`,
+      view,
+      stage,
+      ownerType: index % 3 === 0 ? "agent" : index % 3 === 1 ? "human" : "tbd",
+      ownerName: index % 5 === 0 ? TBD : `Owner ${index + 1}`,
+      stepType: (Object.keys(WORKFLOW_STEP_TYPE_CLASS) as WorkflowStepType[])[index % 7],
+      x: WORKFLOW_STAGE_X[stage] + (index % 3) * 68,
+      y: 110 + Math.floor(index / 6) * 74,
+      source: "sample",
+    };
+  });
+}
+
+export function workflowBoardPanForStep(
+  step: Pick<WorkflowStepRecord, "x" | "y">,
+  zoom: number,
+  viewportCenter = { x: 360, y: 220 },
+) {
+  return {
+    x: viewportCenter.x - step.x * zoom,
+    y: viewportCenter.y - step.y * zoom,
+  };
+}
+
+export function filterWorkflowBoardSteps(steps: WorkflowStepRecord[], search: string) {
+  const q = search.trim().toLowerCase();
+  if (!q) return steps;
+  return steps.filter((step) =>
+    `${step.shortName} ${step.ownerName} ${WORKFLOW_STAGE_LABELS[step.stage]} ${step.stepType}`
+      .toLowerCase()
+      .includes(q),
+  );
+}
+
 function workflowFieldValue(value: string | undefined) {
   return normalizeWorkflowText(value);
 }
@@ -858,6 +900,7 @@ function WorkflowStepCard({
         selected ? "ring-2 ring-primary ring-offset-2 ring-offset-background" : "ring-0",
       )}
       style={{ left: step.x, top: step.y }}
+      onPointerDown={(event) => event.stopPropagation()}
       onClick={(event) => {
         event.stopPropagation();
         onSelect();
@@ -939,13 +982,13 @@ function WorkflowInspector({
   ];
 
   return (
-    <aside className="w-full overflow-y-auto border-l border-border bg-background/95 p-4 lg:w-80">
+    <aside className="relative z-20 w-full overflow-y-auto border-l border-border bg-background/95 p-4 lg:w-80">
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Selected step</p>
           <h2 className="mt-1 text-lg font-semibold">{step.shortName}</h2>
         </div>
-        <Button type="button" variant="outline" size="sm" onClick={onEdit}>Edit</Button>
+        <Button type="button" variant="outline" size="sm" data-testid="workflow-edit-step" onClick={onEdit}>Edit</Button>
       </div>
       <div className="mt-3 flex flex-wrap gap-2">
         <WorkflowSourceChip source={step.source} />
@@ -1148,24 +1191,11 @@ function WorkflowsOperatingBoard({ pipelines }: { pipelines: PipelineListItem[] 
 
   const stressSteps = useMemo<WorkflowStepRecord[]>(() => {
     if (!stressMode) return [];
-    return Array.from({ length: 100 }, (_, index) => {
-      const stage = workflowStageRows(view)[index % workflowStageRows(view).length];
-      return {
-        id: `stress-${view}-${index}`,
-        shortName: `Cluster ${index + 1}`,
-        view,
-        stage,
-        ownerType: index % 3 === 0 ? "agent" : index % 3 === 1 ? "human" : "tbd",
-        ownerName: index % 5 === 0 ? TBD : `Owner ${index + 1}`,
-        stepType: (Object.keys(WORKFLOW_STEP_TYPE_CLASS) as WorkflowStepType[])[index % 7],
-        x: WORKFLOW_STAGE_X[stage] + (index % 3) * 68,
-        y: 110 + Math.floor(index / 6) * 74,
-        source: "sample",
-      };
-    });
+    return buildWorkflowStressSteps(view);
   }, [stressMode, view]);
 
   const steps = useMemo(() => [...base.steps, ...localSteps, ...stressSteps].filter((step) => step.view === view), [base.steps, localSteps, stressSteps, view]);
+  const searchMatches = useMemo(() => filterWorkflowBoardSteps(steps, search), [search, steps]);
   const stepsById = useMemo(() => new Map(steps.map((step) => [step.id, step])), [steps]);
   const edges = useMemo(() => base.edges.filter((edge) => stepsById.has(edge.fromId) && stepsById.has(edge.toId)), [base.edges, stepsById]);
   const selectedStep = stepsById.get(selectedId) ?? steps[0] ?? null;
@@ -1177,13 +1207,11 @@ function WorkflowsOperatingBoard({ pipelines }: { pipelines: PipelineListItem[] 
 
   const focusStep = (step: WorkflowStepRecord) => {
     setSelectedId(step.id);
-    setPan({ x: 360 - step.x * zoom, y: 220 - step.y * zoom });
+    setPan(workflowBoardPanForStep(step, zoom));
   };
 
   const focusSearch = () => {
-    const q = search.trim().toLowerCase();
-    if (!q) return;
-    const match = steps.find((step) => `${step.shortName} ${step.ownerName} ${WORKFLOW_STAGE_LABELS[step.stage]}`.toLowerCase().includes(q));
+    const match = searchMatches[0];
     if (match) focusStep(match);
   };
 
@@ -1229,14 +1257,25 @@ function WorkflowsOperatingBoard({ pipelines }: { pipelines: PipelineListItem[] 
             <label className="relative">
               <span className="sr-only">Search workflows</span>
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input value={search} onChange={(event) => setSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") focusSearch(); }} placeholder="Search" className="h-8 w-44 pl-8" />
+              <Input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                onKeyDown={(event) => { if (event.key === "Enter") focusSearch(); }}
+                placeholder="Search board"
+                aria-label="Search workflow board"
+                data-testid="workflow-board-search"
+                className="h-8 w-44 pl-8"
+              />
             </label>
-            <Button type="button" variant="outline" size="sm" onClick={focusSearch}>Focus</Button>
+            <span className="min-w-14 text-xs text-muted-foreground" data-testid="workflow-board-search-count">
+              {search.trim() ? `${searchMatches.length} found` : `${steps.length} steps`}
+            </span>
+            <Button type="button" variant="outline" size="sm" data-testid="workflow-board-focus" onClick={focusSearch}>Focus</Button>
             <Button type="button" variant="outline" size="sm" onClick={() => setZoom((value) => Math.max(0.45, value - 0.1))}>-</Button>
             <Button type="button" variant="outline" size="sm" onClick={() => setZoom((value) => Math.min(1.4, value + 0.1))}>+</Button>
-            <Button type="button" variant="outline" size="sm" onClick={() => { setZoom(0.78); setPan({ x: 20, y: 20 }); }}>Fit</Button>
-            <Button type="button" variant="outline" size="sm" onClick={() => setStressMode((value) => !value)}>100 items</Button>
-            <Button type="button" variant="outline" size="sm" onClick={() => setLightMode((value) => !value)}>{lightMode ? "Dark" : "Light"}</Button>
+            <Button type="button" variant="outline" size="sm" data-testid="workflow-board-fit" onClick={() => { setZoom(0.78); setPan({ x: 20, y: 20 }); }}>Fit</Button>
+            <Button type="button" variant="outline" size="sm" data-testid="workflow-board-stress" aria-pressed={stressMode} onClick={() => setStressMode((value) => !value)}>100 items</Button>
+            <Button type="button" variant="outline" size="sm" data-testid="workflow-board-theme" aria-pressed={lightMode} onClick={() => setLightMode((value) => !value)}>{lightMode ? "Dark" : "Light"}</Button>
             <Button type="button" size="sm" onClick={() => { setEditingStep(null); setDialogOpen(true); }}><Plus className="mr-1.5 h-3.5 w-3.5" />Step</Button>
           </div>
         </div>
