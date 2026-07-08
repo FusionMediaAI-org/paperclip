@@ -1174,7 +1174,7 @@ function WorkflowsOperatingBoard({ pipelines }: { pipelines: PipelineListItem[] 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingStep, setEditingStep] = useState<WorkflowStepRecord | null>(null);
   const [draggingPalette, setDraggingPalette] = useState<WorkflowStepType | null>(null);
-  const [panning, setPanning] = useState<{ pointerId: number; x: number; y: number; panX: number; panY: number } | null>(null);
+  const [panning, setPanning] = useState<{ pointerId: number; x: number; y: number; panX: number; panY: number; moved: boolean } | null>(null);
 
   useEffect(() => {
     const nextView = workflowBoardViewFromSearch(location.search);
@@ -1300,17 +1300,29 @@ function WorkflowsOperatingBoard({ pipelines }: { pipelines: PipelineListItem[] 
           </div>
           <div
             className="relative min-w-0 flex-1 cursor-grab overflow-hidden bg-[linear-gradient(to_right,rgba(148,163,184,.16)_1px,transparent_1px),linear-gradient(to_bottom,rgba(148,163,184,.16)_1px,transparent_1px)] bg-[size:40px_40px] active:cursor-grabbing"
-            onClick={() => setSelectedId("")}
+            onClick={() => {
+              if (panning?.moved) return;
+              setSelectedId("");
+            }}
             onPointerDown={(event) => {
-              if (event.button !== 0 || event.target !== event.currentTarget) return;
+              if (event.button !== 0) return;
               event.currentTarget.setPointerCapture(event.pointerId);
-              setPanning({ pointerId: event.pointerId, x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y });
+              setPanning({ pointerId: event.pointerId, x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y, moved: false });
             }}
             onPointerMove={(event) => {
               if (!panning || panning.pointerId !== event.pointerId) return;
-              setPan({ x: panning.panX + event.clientX - panning.x, y: panning.panY + event.clientY - panning.y });
+              const nextX = panning.panX + event.clientX - panning.x;
+              const nextY = panning.panY + event.clientY - panning.y;
+              setPan({ x: nextX, y: nextY });
+              if (!panning.moved && (nextX !== panning.panX || nextY !== panning.panY)) {
+                setPanning({ ...panning, moved: true });
+              }
             }}
-            onPointerUp={() => setPanning(null)}
+            onPointerUp={(event) => {
+              if (!panning || panning.pointerId !== event.pointerId) return;
+              window.setTimeout(() => setPanning(null), 0);
+            }}
+            onPointerCancel={() => setPanning(null)}
             onDragOver={(event) => event.preventDefault()}
             onDrop={(event) => {
               event.preventDefault();
