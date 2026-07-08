@@ -11,6 +11,8 @@ import {
   pipelineBoardGroupByStorageKey,
   readStoredPipelineBoardGroupBy,
   readPipelineStageAutomationAssigneeAgentId,
+  workflowBoardSearchForView,
+  workflowBoardViewFromSearch,
   writeStoredPipelineBoardGroupBy,
 } from "./Pipelines";
 import type { PipelineListItem } from "../api/pipelines";
@@ -74,6 +76,20 @@ describe("buildWorkflowBoardRecords", () => {
       kind: "handoff",
       source: "real",
     }));
+  });
+});
+
+describe("workflow board route view state", () => {
+  it("reads verification view aliases from the query string", () => {
+    expect(workflowBoardViewFromSearch("?view=customer-journey")).toBe("customer");
+    expect(workflowBoardViewFromSearch("?view=business-operations")).toBe("operations");
+    expect(workflowBoardViewFromSearch("?view=operations")).toBe("operations");
+    expect(workflowBoardViewFromSearch("")).toBe("customer");
+  });
+
+  it("writes shareable workflow view query strings without dropping other params", () => {
+    expect(workflowBoardSearchForView("?mode=compact", "customer")).toBe("?mode=compact&view=customer-journey");
+    expect(workflowBoardSearchForView("?view=customer-journey", "operations")).toBe("?view=business-operations");
   });
 });
 

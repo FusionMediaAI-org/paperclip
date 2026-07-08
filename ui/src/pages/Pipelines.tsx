@@ -598,12 +598,27 @@ function PipelineStatusChip({ archivedAt }: { archivedAt: Date | string | null }
   );
 }
 
-type WorkflowBoardView = "customer" | "operations";
+export type WorkflowBoardView = "customer" | "operations";
 type WorkflowOwnerType = "human" | "agent" | "hybrid" | "tbd";
 type WorkflowStepType = "intake" | "manual" | "agent" | "approval" | "handoff" | "reporting" | "governance";
 type WorkflowEdgeKind = "trigger" | "handoff" | "file" | "support" | "governance" | "approval";
 type WorkflowStage = "demand" | "sales" | "production" | "support" | "tools" | "governance" | "reporting" | "manual" | "agent";
 type WorkflowDataSource = "real" | "sample" | "local";
+
+export function workflowBoardViewFromSearch(search: string): WorkflowBoardView {
+  const raw = new URLSearchParams(search).get("view")?.trim().toLowerCase();
+  if (raw === "operations" || raw === "business-operations" || raw === "business_operations") {
+    return "operations";
+  }
+  return "customer";
+}
+
+export function workflowBoardSearchForView(search: string, view: WorkflowBoardView): string {
+  const params = new URLSearchParams(search);
+  params.set("view", view === "operations" ? "business-operations" : "customer-journey");
+  const next = params.toString();
+  return next ? `?${next}` : "";
+}
 
 export interface WorkflowStepRecord {
   id: string;
@@ -1103,7 +1118,9 @@ function WorkflowStepDialog({
 
 function WorkflowsOperatingBoard({ pipelines }: { pipelines: PipelineListItem[] }) {
   const base = useMemo(() => buildWorkflowBoardRecords(pipelines), [pipelines]);
-  const [view, setView] = useState<WorkflowBoardView>("customer");
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [view, setView] = useState<WorkflowBoardView>(() => workflowBoardViewFromSearch(location.search));
   const [localSteps, setLocalSteps] = useState<WorkflowStepRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string>("seed-website");
   const [search, setSearch] = useState("");
@@ -1115,6 +1132,19 @@ function WorkflowsOperatingBoard({ pipelines }: { pipelines: PipelineListItem[] 
   const [editingStep, setEditingStep] = useState<WorkflowStepRecord | null>(null);
   const [draggingPalette, setDraggingPalette] = useState<WorkflowStepType | null>(null);
   const [panning, setPanning] = useState<{ pointerId: number; x: number; y: number; panX: number; panY: number } | null>(null);
+
+  useEffect(() => {
+    const nextView = workflowBoardViewFromSearch(location.search);
+    setView((current) => (current === nextView ? current : nextView));
+  }, [location.search]);
+
+  const selectView = (nextView: WorkflowBoardView) => {
+    setView(nextView);
+    const nextSearch = workflowBoardSearchForView(location.search, nextView);
+    if (nextSearch !== location.search) {
+      navigate(`${location.pathname}${nextSearch}${location.hash}`, { replace: true });
+    }
+  };
 
   const stressSteps = useMemo<WorkflowStepRecord[]>(() => {
     if (!stressMode) return [];
@@ -1190,8 +1220,8 @@ function WorkflowsOperatingBoard({ pipelines }: { pipelines: PipelineListItem[] 
         <div className="flex flex-col gap-3 border-b border-white/10 bg-background/95 p-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex overflow-hidden rounded-md border border-border">
-              <button type="button" className={cn("px-3 py-1.5 text-sm", view === "customer" ? "bg-primary text-primary-foreground" : "bg-background")} onClick={() => setView("customer")}>Customer Journey</button>
-              <button type="button" className={cn("px-3 py-1.5 text-sm", view === "operations" ? "bg-primary text-primary-foreground" : "bg-background")} onClick={() => setView("operations")}>Business Operations</button>
+              <button type="button" className={cn("px-3 py-1.5 text-sm", view === "customer" ? "bg-primary text-primary-foreground" : "bg-background")} onClick={() => selectView("customer")}>Customer Journey</button>
+              <button type="button" className={cn("px-3 py-1.5 text-sm", view === "operations" ? "bg-primary text-primary-foreground" : "bg-background")} onClick={() => selectView("operations")}>Business Operations</button>
             </div>
             <WorkflowEdgeLegend />
           </div>
