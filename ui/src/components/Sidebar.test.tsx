@@ -371,14 +371,15 @@ describe("Sidebar", () => {
     });
   });
 
-  it("hides the Workflows nav item when pipelines are disabled", async () => {
+  it("shows the Workflows nav item even when pipelines are disabled", async () => {
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({
       enableIsolatedWorkspaces: false,
       enablePipelines: false,
     });
     const root = await renderSidebar();
 
-    expect(container.textContent).not.toContain("Workflows");
+    const link = [...container.querySelectorAll("a")].find((anchor) => anchor.textContent === "Workflows");
+    expect(link?.getAttribute("href")).toBe("/workflows");
 
     flushSync(() => {
       root.unmount();
@@ -400,11 +401,27 @@ describe("Sidebar", () => {
     });
   });
 
-  it("does not flash the Workflows nav item while experimental settings are loading", async () => {
+  it("shows the Workflows nav item while experimental settings are loading", async () => {
     mockInstanceSettingsApi.getExperimental.mockImplementation(() => new Promise(() => {}));
     const root = await renderSidebar();
 
-    expect(container.textContent).not.toContain("Workflows");
+    const link = [...container.querySelectorAll("a")].find((anchor) => anchor.textContent === "Workflows");
+    expect(link?.getAttribute("href")).toBe("/workflows");
+
+    flushSync(() => {
+      root.unmount();
+    });
+  });
+
+  it("labels the costs dashboard as Metrics in the left nav", async () => {
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: false });
+    const root = await renderSidebar();
+
+    const link = [...container.querySelectorAll("a")].find((anchor) => anchor.textContent === "Metrics");
+    expect(link?.getAttribute("href")).toBe("/costs");
+    expect([...container.querySelectorAll("nav a")].map((anchor) => anchor.textContent?.trim())).not.toContain(
+      "Costs",
+    );
 
     flushSync(() => {
       root.unmount();
