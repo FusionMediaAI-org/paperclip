@@ -7,6 +7,7 @@ import {
 import {
   buildWorkflowBoardRecords,
   buildWorkflowStressSteps,
+  composeWorkflowBoardModel,
   filterWorkflowBoardSteps,
   groupCasesByBuiltFor,
   normalizePipelineConversationComments,
@@ -14,6 +15,7 @@ import {
   readStoredPipelineBoardGroupBy,
   readPipelineStageAutomationAssigneeAgentId,
   WORKFLOW_STRESS_STEP_COUNT,
+  reviewWorkflowDraft,
   workflowBoardPanForStep,
   workflowBoardSearchForView,
   workflowBoardViewFromSearch,
@@ -128,6 +130,60 @@ describe("workflow board verification affordances", () => {
     expect(pan.x).toBeCloseTo(-84.6);
     expect(pan.y).toBeCloseTo(71.8);
     expect(workflowBoardPanForStep({ x: 100, y: 200 }, 1, { x: 500, y: 300 })).toEqual({ x: 400, y: 100 });
+  });
+});
+
+describe("workflow draft/live review model", () => {
+  it("applies layout positions without creating a semantic draft", () => {
+    const base = buildWorkflowBoardRecords([]);
+    const model = composeWorkflowBoardModel(
+      base,
+      { steps: [], edges: [] },
+      { steps: [], edges: [] },
+      { positions: { "seed-website": { x: 321, y: 654 } }, panByView: { customer: undefined, operations: undefined }, zoomByView: { customer: undefined, operations: undefined } },
+    );
+
+    expect(model.hasDraft).toBe(false);
+    expect(model.steps.find((step) => step.id === "seed-website")).toMatchObject({ x: 321, y: 654 });
+  });
+
+  it("keeps semantic edits as a draft overlay until promotion", () => {
+    const base = buildWorkflowBoardRecords([]);
+    const draftStep = { ...base.steps.find((step) => step.id === "seed-qualify")!, ownerName: "Sales Agent", source: "local" as const };
+    const model = composeWorkflowBoardModel(
+      base,
+      { steps: [], edges: [] },
+      { steps: [draftStep], edges: [] },
+      { positions: {}, panByView: { customer: undefined, operations: undefined }, zoomByView: { customer: undefined, operations: undefined } },
+    );
+
+    expect(model.hasDraft).toBe(true);
+    expect(model.steps.find((step) => step.id === "seed-qualify")?.ownerName).toBe("Sales Agent");
+    expect(base.steps.find((step) => step.id === "seed-qualify")?.ownerName).toBe("_TBD_");
+  });
+
+  it("blocks promotion when review finds a broken edge or unapproved tool", () => {
+    const base = buildWorkflowBoardRecords([]);
+    const review = reviewWorkflowDraft(
+      [
+        ...base.steps,
+        { ...base.steps[0]!, id: "tool-step", shortName: "Tool Step", knowledgeSources: "tool:unknown-root" },
+      ],
+      [...base.edges, { id: "broken", fromId: "seed-website", toId: "missing-step", kind: "handoff", label: "broken handoff", source: "local" }],
+    );
+
+    expect(review.ok).toBe(false);
+    expect(review.issues).toEqual(expect.arrayContaining([
+      expect.stringContaining("missing-step"),
+      expect.stringContaining("tool:unknown-root"),
+    ]));
+  });
+
+  it("allows clean promotion candidates with resolved trigger and approval gates", () => {
+    const base = buildWorkflowBoardRecords([]);
+    const review = reviewWorkflowDraft(base.steps, base.edges);
+
+    expect(review).toEqual({ ok: true, issues: [] });
   });
 });
 

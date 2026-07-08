@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { groupWarningsByStage, LOW_TRUST_REVIEW_PRESET } from "@paperclipai/shared";
 import type {
@@ -604,6 +604,26 @@ type WorkflowStepType = "intake" | "manual" | "agent" | "approval" | "handoff" |
 type WorkflowEdgeKind = "trigger" | "handoff" | "file" | "support" | "governance" | "approval";
 type WorkflowStage = "demand" | "sales" | "production" | "support" | "tools" | "governance" | "reporting" | "manual" | "agent";
 type WorkflowDataSource = "real" | "sample" | "local";
+type WorkflowPromotionStatus = "idle" | "blocked" | "promoted";
+
+type WorkflowBoardStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+
+export interface WorkflowSemanticDraft {
+  steps: WorkflowStepRecord[];
+  edges: WorkflowEdgeRecord[];
+}
+
+export interface WorkflowLayoutState {
+  positions: Record<string, { x: number; y: number }>;
+  panByView: Record<WorkflowBoardView, { x: number; y: number } | undefined>;
+  zoomByView: Record<WorkflowBoardView, number | undefined>;
+}
+
+interface WorkflowBoardState {
+  live: WorkflowSemanticDraft;
+  draft: WorkflowSemanticDraft;
+  layout: WorkflowLayoutState;
+}
 
 export function workflowBoardViewFromSearch(search: string): WorkflowBoardView {
   const raw = new URLSearchParams(search).get("view")?.trim().toLowerCase();
@@ -650,6 +670,10 @@ export interface WorkflowEdgeRecord {
 }
 
 const TBD = "_TBD_";
+const WORKFLOW_BOARD_STORAGE_KEY = "paperclip.workflows.board.v1";
+const EMPTY_WORKFLOW_SEMANTIC_DRAFT: WorkflowSemanticDraft = { steps: [], edges: [] };
+const EMPTY_WORKFLOW_LAYOUT_STATE: WorkflowLayoutState = { positions: {}, panByView: { customer: undefined, operations: undefined }, zoomByView: { customer: undefined, operations: undefined } };
+const APPROVED_VAULT_TOOL_INVENTORY = new Set(["airtable", "paperclip", "github", "google-drive", "dropbox", "wave", "search-console", "ga4"]);
 
 const WORKFLOW_STAGE_LABELS: Record<WorkflowStage, string> = {
   demand: "Demand Gen",
@@ -741,6 +765,159 @@ const SEED_EDGES: WorkflowEdgeRecord[] = [
 function normalizeWorkflowText(value: string | null | undefined) {
   const trimmed = value?.trim();
   return trimmed && trimmed.length > 0 ? trimmed : TBD;
+}
+
+function normalizeWorkflowStepRecord(value: unknown): WorkflowStepRecord | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<WorkflowStepRecord>;
+  if (!candidate.id || !candidate.shortName || !candidate.view || !candidate.stage || !candidate.ownerType || !candidate.stepType) return null;
+  if (typeof candidate.x !== "number" || typeof candidate.y !== "number") return null;
+  return {
+    id: candidate.id,
+    shortName: candidate.shortName,
+    view: candidate.view,
+    stage: candidate.stage,
+    ownerType: candidate.ownerType,
+    ownerName: normalizeWorkflowText(candidate.ownerName),
+    stepType: candidate.stepType,
+    x: candidate.x,
+    y: candidate.y,
+    source: candidate.source === "real" ? "real" : "local",
+    completionMethod: candidate.completionMethod,
+    triggerMechanism: candidate.triggerMechanism,
+    inputs: candidate.inputs,
+    outputs: candidate.outputs,
+    knowledgeSources: candidate.knowledgeSources,
+    handoffFiles: candidate.handoffFiles,
+    linkedRecord: candidate.linkedRecord,
+  };
+}
+
+function normalizeWorkflowEdgeRecord(value: unknown): WorkflowEdgeRecord | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<WorkflowEdgeRecord>;
+  if (!candidate.id || !candidate.fromId || !candidate.toId || !candidate.kind) return null;
+  return {
+    id: candidate.id,
+    fromId: candidate.fromId,
+    toId: candidate.toId,
+    kind: candidate.kind,
+    label: candidate.label?.trim() || "handoff",
+    source: candidate.source === "real" ? "real" : "local",
+  };
+}
+
+function normalizeWorkflowSemanticDraft(value: unknown): WorkflowSemanticDraft {
+  if (!value || typeof value !== "object") return EMPTY_WORKFLOW_SEMANTIC_DRAFT;
+  const candidate = value as Partial<WorkflowSemanticDraft>;
+  return {
+    steps: Array.isArray(candidate.steps) ? candidate.steps.map(normalizeWorkflowStepRecord).filter((step): step is WorkflowStepRecord => Boolean(step)) : [],
+    edges: Array.isArray(candidate.edges) ? candidate.edges.map(normalizeWorkflowEdgeRecord).filter((edge): edge is WorkflowEdgeRecord => Boolean(edge)) : [],
+  };
+}
+
+function normalizeWorkflowLayoutState(value: unknown): WorkflowLayoutState {
+  if (!value || typeof value !== "object") return EMPTY_WORKFLOW_LAYOUT_STATE;
+  const candidate = value as Partial<WorkflowLayoutState>;
+  const positions: WorkflowLayoutState["positions"] = {};
+  if (candidate.positions && typeof candidate.positions === "object") {
+    for (const [id, position] of Object.entries(candidate.positions)) {
+      if (position && typeof position.x === "number" && typeof position.y === "number") positions[id] = { x: position.x, y: position.y };
+    }
+  }
+  return {
+    positions,
+    panByView: {
+      customer: candidate.panByView?.customer,
+      operations: candidate.panByView?.operations,
+    },
+    zoomByView: {
+      customer: typeof candidate.zoomByView?.customer === "number" ? candidate.zoomByView.customer : undefined,
+      operations: typeof candidate.zoomByView?.operations === "number" ? candidate.zoomByView.operations : undefined,
+    },
+  };
+}
+
+function emptyWorkflowBoardState(): WorkflowBoardState {
+  return {
+    live: { steps: [], edges: [] },
+    draft: { steps: [], edges: [] },
+    layout: { positions: {}, panByView: { customer: undefined, operations: undefined }, zoomByView: { customer: undefined, operations: undefined } },
+  };
+}
+
+function readWorkflowBoardState(storage: WorkflowBoardStorage | null | undefined): WorkflowBoardState {
+  if (!storage) return emptyWorkflowBoardState();
+  try {
+    const raw = storage.getItem(WORKFLOW_BOARD_STORAGE_KEY);
+    if (!raw) return emptyWorkflowBoardState();
+    const parsed = JSON.parse(raw) as Partial<WorkflowBoardState>;
+    return {
+      live: normalizeWorkflowSemanticDraft(parsed.live),
+      draft: normalizeWorkflowSemanticDraft(parsed.draft),
+      layout: normalizeWorkflowLayoutState(parsed.layout),
+    };
+  } catch {
+    return emptyWorkflowBoardState();
+  }
+}
+
+function writeWorkflowBoardState(storage: WorkflowBoardStorage | null | undefined, state: WorkflowBoardState) {
+  if (!storage) return;
+  try {
+    storage.setItem(WORKFLOW_BOARD_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // Storage quota/private mode should not break editor interactions.
+  }
+}
+
+function mergeWorkflowRecords<T extends { id: string }>(base: T[], overlay: T[]) {
+  const byId = new Map(base.map((item) => [item.id, item]));
+  for (const item of overlay) byId.set(item.id, item);
+  return Array.from(byId.values());
+}
+
+function applyWorkflowLayout(steps: WorkflowStepRecord[], layout: WorkflowLayoutState) {
+  return steps.map((step) => {
+    const position = layout.positions[step.id];
+    return position ? { ...step, x: position.x, y: position.y } : step;
+  });
+}
+
+export function composeWorkflowBoardModel(
+  base: { steps: WorkflowStepRecord[]; edges: WorkflowEdgeRecord[] },
+  live: WorkflowSemanticDraft,
+  draft: WorkflowSemanticDraft,
+  layout: WorkflowLayoutState,
+) {
+  const liveSteps = mergeWorkflowRecords(base.steps, live.steps);
+  const liveEdges = mergeWorkflowRecords(base.edges, live.edges);
+  return {
+    steps: applyWorkflowLayout(mergeWorkflowRecords(liveSteps, draft.steps), layout),
+    edges: mergeWorkflowRecords(liveEdges, draft.edges),
+    hasDraft: draft.steps.length > 0 || draft.edges.length > 0,
+  };
+}
+
+export function reviewWorkflowDraft(steps: WorkflowStepRecord[], edges: WorkflowEdgeRecord[]) {
+  const issues: string[] = [];
+  const stepsById = new Map(steps.map((step) => [step.id, step]));
+  for (const edge of edges) {
+    const from = stepsById.get(edge.fromId);
+    const to = stepsById.get(edge.toId);
+    if (!from || !to) issues.push(`Broken edge "${edge.label}" references ${!from ? edge.fromId : edge.toId}.`);
+    if (edge.kind === "handoff" && !to) issues.push(`Dangling handoff "${edge.label}" has no resolved receiver.`);
+    if (edge.kind === "trigger" && (!from?.triggerMechanism || normalizeWorkflowText(from.triggerMechanism) === TBD)) issues.push(`Trigger edge "${edge.label}" starts from a step without a resolved trigger.`);
+  }
+  const approvalSteps = steps.filter((step) => step.stepType === "approval" || /approval|gate/i.test(`${step.shortName} ${step.completionMethod ?? ""}`));
+  if (approvalSteps.length === 0) issues.push("No required human approval gate is present.");
+  for (const step of steps) {
+    for (const match of (step.knowledgeSources ?? "").matchAll(/\btool:([a-z0-9_-]+)/gi)) {
+      const tool = match[1]?.toLowerCase();
+      if (tool && !APPROVED_VAULT_TOOL_INVENTORY.has(tool)) issues.push(`${step.shortName} requests tool:${tool}, which is outside the vault tool inventory.`);
+    }
+  }
+  return { ok: issues.length === 0, issues };
 }
 
 function classifyWorkflowStage(pipeline: PipelineListItem): WorkflowStage {
@@ -884,11 +1061,14 @@ function WorkflowStepCard({
   step,
   selected,
   onSelect,
+  onMove,
 }: {
   step: WorkflowStepRecord;
   selected: boolean;
   onSelect: () => void;
+  onMove: (stepId: string, position: { x: number; y: number }) => void;
 }) {
+  const dragRef = useRef<{ pointerId: number; x: number; y: number; stepX: number; stepY: number; moved: boolean } | null>(null);
   return (
     <button
       type="button"
@@ -900,9 +1080,29 @@ function WorkflowStepCard({
         selected ? "ring-2 ring-primary ring-offset-2 ring-offset-background" : "ring-0",
       )}
       style={{ left: step.x, top: step.y }}
-      onPointerDown={(event) => event.stopPropagation()}
+      onPointerDown={(event) => {
+        event.stopPropagation();
+        if (event.button !== 0) return;
+        event.currentTarget.setPointerCapture(event.pointerId);
+        dragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, stepX: step.x, stepY: step.y, moved: false };
+      }}
+      onPointerMove={(event) => {
+        const drag = dragRef.current;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        const next = {
+          x: Math.round(drag.stepX + event.clientX - drag.x),
+          y: Math.round(drag.stepY + event.clientY - drag.y),
+        };
+        if (!drag.moved && (next.x !== drag.stepX || next.y !== drag.stepY)) dragRef.current = { ...drag, moved: true };
+        onMove(step.id, next);
+      }}
+      onPointerUp={(event) => {
+        if (dragRef.current?.pointerId === event.pointerId) window.setTimeout(() => { dragRef.current = null; }, 0);
+      }}
+      onPointerCancel={() => { dragRef.current = null; }}
       onClick={(event) => {
         event.stopPropagation();
+        if (dragRef.current?.moved) return;
         onSelect();
       }}
     >
@@ -1164,22 +1364,41 @@ function WorkflowsOperatingBoard({ pipelines }: { pipelines: PipelineListItem[] 
   const location = useLocation();
   const navigate = useNavigate();
   const [view, setView] = useState<WorkflowBoardView>(() => workflowBoardViewFromSearch(location.search));
-  const [localSteps, setLocalSteps] = useState<WorkflowStepRecord[]>([]);
+  const [boardState, setBoardState] = useState<WorkflowBoardState>(() => readWorkflowBoardState(typeof window === "undefined" ? null : window.localStorage));
   const [selectedId, setSelectedId] = useState<string>("seed-website");
   const [search, setSearch] = useState("");
-  const [zoom, setZoom] = useState(0.78);
-  const [pan, setPan] = useState({ x: 20, y: 20 });
+  const [zoom, setZoom] = useState(() => boardState.layout.zoomByView[workflowBoardViewFromSearch(location.search)] ?? 0.78);
+  const [pan, setPan] = useState(() => boardState.layout.panByView[workflowBoardViewFromSearch(location.search)] ?? { x: 20, y: 20 });
   const [lightMode, setLightMode] = useState(false);
   const [stressMode, setStressMode] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingStep, setEditingStep] = useState<WorkflowStepRecord | null>(null);
   const [draggingPalette, setDraggingPalette] = useState<WorkflowStepType | null>(null);
   const [panning, setPanning] = useState<{ pointerId: number; x: number; y: number; panX: number; panY: number; moved: boolean } | null>(null);
+  const [reviewIssues, setReviewIssues] = useState<string[]>([]);
+  const [promotionStatus, setPromotionStatus] = useState<WorkflowPromotionStatus>("idle");
 
   useEffect(() => {
     const nextView = workflowBoardViewFromSearch(location.search);
-    setView((current) => (current === nextView ? current : nextView));
+    setView((current) => {
+      if (current === nextView) return current;
+      setPan(boardState.layout.panByView[nextView] ?? { x: 20, y: 20 });
+      setZoom(boardState.layout.zoomByView[nextView] ?? 0.78);
+      return nextView;
+    });
   }, [location.search]);
+
+  const commitBoardState = (updater: (current: WorkflowBoardState) => WorkflowBoardState) => {
+    setBoardState((current) => {
+      const next = updater(current);
+      writeWorkflowBoardState(typeof window === "undefined" ? null : window.localStorage, next);
+      return next;
+    });
+  };
+
+  const commitLayout = (updater: (layout: WorkflowLayoutState) => WorkflowLayoutState) => {
+    commitBoardState((current) => ({ ...current, layout: updater(current.layout) }));
+  };
 
   const selectView = (nextView: WorkflowBoardView) => {
     setView(nextView);
@@ -1194,10 +1413,11 @@ function WorkflowsOperatingBoard({ pipelines }: { pipelines: PipelineListItem[] 
     return buildWorkflowStressSteps(view);
   }, [stressMode, view]);
 
-  const steps = useMemo(() => [...base.steps, ...localSteps, ...stressSteps].filter((step) => step.view === view), [base.steps, localSteps, stressSteps, view]);
+  const boardModel = useMemo(() => composeWorkflowBoardModel(base, boardState.live, boardState.draft, boardState.layout), [base, boardState]);
+  const steps = useMemo(() => [...boardModel.steps, ...stressSteps].filter((step) => step.view === view), [boardModel.steps, stressSteps, view]);
   const searchMatches = useMemo(() => filterWorkflowBoardSteps(steps, search), [search, steps]);
   const stepsById = useMemo(() => new Map(steps.map((step) => [step.id, step])), [steps]);
-  const edges = useMemo(() => base.edges.filter((edge) => stepsById.has(edge.fromId) && stepsById.has(edge.toId)), [base.edges, stepsById]);
+  const edges = useMemo(() => boardModel.edges.filter((edge) => stepsById.has(edge.fromId) && stepsById.has(edge.toId)), [boardModel.edges, stepsById]);
   const selectedStep = stepsById.get(selectedId) ?? steps[0] ?? null;
 
   useEffect(() => {
@@ -1207,7 +1427,9 @@ function WorkflowsOperatingBoard({ pipelines }: { pipelines: PipelineListItem[] 
 
   const focusStep = (step: WorkflowStepRecord) => {
     setSelectedId(step.id);
-    setPan(workflowBoardPanForStep(step, zoom));
+    const nextPan = workflowBoardPanForStep(step, zoom);
+    setPan(nextPan);
+    commitLayout((layout) => ({ ...layout, panByView: { ...layout.panByView, [view]: nextPan } }));
   };
 
   const focusSearch = () => {
@@ -1216,13 +1438,38 @@ function WorkflowsOperatingBoard({ pipelines }: { pipelines: PipelineListItem[] 
   };
 
   const saveStep = (step: WorkflowStepRecord) => {
-    setLocalSteps((current) => {
-      const next = current.filter((item) => item.id !== step.id);
-      return [...next, { ...step, source: step.source === "real" ? "real" : "local" }];
+    commitBoardState((current) => {
+      const next = current.draft.steps.filter((item) => item.id !== step.id);
+      return { ...current, draft: { ...current.draft, steps: [...next, { ...step, source: step.source === "real" ? "real" : "local" }] } };
     });
     setSelectedId(step.id);
+    setPromotionStatus("idle");
+    setReviewIssues([]);
     setDialogOpen(false);
     setEditingStep(null);
+  };
+
+  const moveStep = (stepId: string, position: { x: number; y: number }) => {
+    commitLayout((layout) => ({ ...layout, positions: { ...layout.positions, [stepId]: position } }));
+  };
+
+  const pushToLive = () => {
+    const candidate = composeWorkflowBoardModel(base, boardState.live, boardState.draft, boardState.layout);
+    const review = reviewWorkflowDraft(candidate.steps, candidate.edges);
+    setReviewIssues(review.issues);
+    if (!review.ok) {
+      setPromotionStatus("blocked");
+      return;
+    }
+    commitBoardState((current) => ({
+      ...current,
+      live: {
+        steps: mergeWorkflowRecords(current.live.steps, current.draft.steps),
+        edges: mergeWorkflowRecords(current.live.edges, current.draft.edges),
+      },
+      draft: { steps: [], edges: [] },
+    }));
+    setPromotionStatus("promoted");
   };
 
   const createAt = (stepType: WorkflowStepType, clientX: number, clientY: number, bounds: DOMRect) => {
@@ -1271,14 +1518,41 @@ function WorkflowsOperatingBoard({ pipelines }: { pipelines: PipelineListItem[] 
               {search.trim() ? `${searchMatches.length} found` : `${steps.length} steps`}
             </span>
             <Button type="button" variant="outline" size="sm" data-testid="workflow-board-focus" onClick={focusSearch}>Focus</Button>
-            <Button type="button" variant="outline" size="sm" onClick={() => setZoom((value) => Math.max(0.45, value - 0.1))}>-</Button>
-            <Button type="button" variant="outline" size="sm" onClick={() => setZoom((value) => Math.min(1.4, value + 0.1))}>+</Button>
-            <Button type="button" variant="outline" size="sm" data-testid="workflow-board-fit" onClick={() => { setZoom(0.78); setPan({ x: 20, y: 20 }); }}>Fit</Button>
+            <Button type="button" variant="outline" size="sm" onClick={() => setZoom((value) => {
+              const nextZoom = Math.max(0.45, value - 0.1);
+              commitLayout((layout) => ({ ...layout, zoomByView: { ...layout.zoomByView, [view]: nextZoom } }));
+              return nextZoom;
+            })}>-</Button>
+            <Button type="button" variant="outline" size="sm" onClick={() => setZoom((value) => {
+              const nextZoom = Math.min(1.4, value + 0.1);
+              commitLayout((layout) => ({ ...layout, zoomByView: { ...layout.zoomByView, [view]: nextZoom } }));
+              return nextZoom;
+            })}>+</Button>
+            <Button type="button" variant="outline" size="sm" data-testid="workflow-board-fit" onClick={() => {
+              const nextPan = { x: 20, y: 20 };
+              setZoom(0.78);
+              setPan(nextPan);
+              commitLayout((layout) => ({ ...layout, panByView: { ...layout.panByView, [view]: nextPan }, zoomByView: { ...layout.zoomByView, [view]: 0.78 } }));
+            }}>Fit</Button>
             <Button type="button" variant="outline" size="sm" data-testid="workflow-board-stress" aria-pressed={stressMode} onClick={() => setStressMode((value) => !value)}>100 items</Button>
             <Button type="button" variant="outline" size="sm" data-testid="workflow-board-theme" aria-pressed={lightMode} onClick={() => setLightMode((value) => !value)}>{lightMode ? "Dark" : "Light"}</Button>
+            <Button type="button" variant="outline" size="sm" data-testid="workflow-push-live" disabled={!boardModel.hasDraft} onClick={pushToLive}>Push to live</Button>
             <Button type="button" size="sm" onClick={() => { setEditingStep(null); setDialogOpen(true); }}><Plus className="mr-1.5 h-3.5 w-3.5" />Step</Button>
           </div>
         </div>
+        <div className="flex flex-wrap items-center gap-2 border-b border-white/10 bg-background/90 px-3 py-2 text-xs" aria-live="polite">
+          <span data-testid="workflow-draft-status" className={cn("rounded-sm border px-2 py-1 font-semibold", boardModel.hasDraft ? "border-amber-400/50 text-amber-700 dark:text-amber-300" : "border-emerald-400/40 text-emerald-700 dark:text-emerald-300")}>
+            {boardModel.hasDraft ? "Draft changes pending" : "Live version current"}
+          </span>
+          <span className="text-muted-foreground">Layout saves automatically.</span>
+          {promotionStatus === "promoted" ? <span className="text-emerald-700 dark:text-emerald-300">Clean review promoted to live.</span> : null}
+          {promotionStatus === "blocked" ? <span className="text-destructive">Agent review blocked promotion: {reviewIssues[0]}</span> : null}
+        </div>
+        {reviewIssues.length > 1 ? (
+          <div data-testid="workflow-review-issues" className="border-b border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            {reviewIssues.map((issue) => <p key={issue}>{issue}</p>)}
+          </div>
+        ) : null}
         <div className="flex min-h-0 flex-1">
           <div className="w-36 shrink-0 border-r border-white/10 bg-background/80 p-3">
             <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Palette</p>
@@ -1314,6 +1588,7 @@ function WorkflowsOperatingBoard({ pipelines }: { pipelines: PipelineListItem[] 
               const nextX = panning.panX + event.clientX - panning.x;
               const nextY = panning.panY + event.clientY - panning.y;
               setPan({ x: nextX, y: nextY });
+              commitLayout((layout) => ({ ...layout, panByView: { ...layout.panByView, [view]: { x: nextX, y: nextY } } }));
               if (!panning.moved && (nextX !== panning.panX || nextY !== panning.panY)) {
                 setPanning({ ...panning, moved: true });
               }
@@ -1343,7 +1618,7 @@ function WorkflowsOperatingBoard({ pipelines }: { pipelines: PipelineListItem[] 
                 return from && to ? <WorkflowEdgeLine key={edge.id} edge={edge} from={from} to={to} /> : null;
               })}
               {steps.map((step) => (
-                <WorkflowStepCard key={step.id} step={step} selected={selectedId === step.id} onSelect={() => setSelectedId(step.id)} />
+                <WorkflowStepCard key={step.id} step={step} selected={selectedId === step.id} onSelect={() => setSelectedId(step.id)} onMove={moveStep} />
               ))}
             </div>
           </div>
