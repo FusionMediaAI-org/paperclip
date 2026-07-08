@@ -155,7 +155,7 @@ function boardRoutes() {
       />
       <Route
         path="workflows"
-        element={<PipelinesExperimentalGate><Pipelines /></PipelinesExperimentalGate>}
+        element={<Pipelines />}
       />
       <Route
         path="nodeview"
