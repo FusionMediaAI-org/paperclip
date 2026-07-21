@@ -18,6 +18,8 @@ const payload = {
   paperclipApiUrl: process.env.PAPERCLIP_API_URL || null,
   paperclipApiKey: process.env.PAPERCLIP_API_KEY || null,
   paperclipApiBridgeMode: process.env.PAPERCLIP_API_BRIDGE_MODE || null,
+  paperclipTaskId: process.env.PAPERCLIP_TASK_ID || null,
+  discordWebhookDigests: process.env.DISCORD_WEBHOOK_DIGESTS || null,
   paperclipEnvKeys: Object.keys(process.env)
     .filter((key) => key.startsWith("PAPERCLIP_"))
     .sort(),
@@ -42,6 +44,12 @@ process.exit(1);
   await fs.chmod(commandPath, 0o755);
 }
 
+async function writeWindowsCodexCommandShim(commandPath: string): Promise<void> {
+  const scriptPath = `${commandPath}.cjs`;
+  await writeFakeCodexCommand(scriptPath);
+  await fs.writeFile(commandPath, `@echo off\r\n"${process.execPath}" "%~dp0${path.basename(scriptPath)}" %*\r\n`, "utf8");
+}
+
 type CapturePayload = {
   argv: string[];
   prompt: string;
@@ -50,6 +58,8 @@ type CapturePayload = {
   paperclipApiUrl?: string | null;
   paperclipApiKey?: string | null;
   paperclipApiBridgeMode?: string | null;
+  paperclipTaskId?: string | null;
+  discordWebhookDigests?: string | null;
   paperclipEnvKeys: string[];
 };
 
@@ -99,6 +109,65 @@ function createLocalSandboxRunner() {
 }
 
 describe("codex execute", () => {
+  it("passes resolved non-Paperclip env without overriding runtime-owned Paperclip vars", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-env-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "codex.cmd");
+    const capturePath = path.join(root, "capture.json");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeWindowsCodexCommandShim(commandPath);
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = root;
+    await seedSharedCodexAuth(root);
+
+    try {
+      const result = await execute({
+        runId: "run-env-forwarding",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Codex Coder",
+          adapterType: "codex_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          env: {
+            DISCORD_WEBHOOK_DIGESTS: "https://discord.example/webhook",
+            PAPERCLIP_TASK_ID: "spoofed-task",
+            PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+          },
+          promptTemplate: "Follow the paperclip heartbeat.",
+        },
+        context: {
+          issueId: "issue-real",
+        },
+        authToken: "run-jwt-token",
+        onLog: async () => {},
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.errorMessage).toBeNull();
+
+      const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
+      expect(capture.discordWebhookDigests).toBe("https://discord.example/webhook");
+      expect(capture.paperclipTaskId).toBe("issue-real");
+      expect(capture.paperclipEnvKeys).toContain("PAPERCLIP_RUN_ID");
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("uses a Paperclip-managed CODEX_HOME outside worktree mode while preserving shared auth and config", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-default-"));
     const workspace = path.join(root, "workspace");
